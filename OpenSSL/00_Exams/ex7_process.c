@@ -23,55 +23,79 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <openssl/bn.h>
+
 #include <openssl/rsa.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/err.h>
+#include <openssl/bn.h>
 
-char *process(char *data, int length, RSA *rsa_priv_key) {
-    ERR_load_crypto_strings();
-    OpenSSL_add_all_algorithms();
-	
-	/*if(RSA_private_decrypt(length, (unsigned char*)data,
-                          (unsigned char*)decrypted_data,
-                          rsa_priv_key, RSA_PKCS1_OAEP_PADDING) == -1) 
-            return NULL;*/
-	
-	// RSA manual decrypt: m^d mod n 
-	BIGNUM *m_bn = BN_new();
-	BN_hex2bn(&m_bn, data);
-	BIGNUM *d = rsa->d;
-	BIGNUM *n = rsa->n;
-	BIGNUM *res = BN_new();
-	
-	if (!BN_mod_exp(res,m,d,n,ctx)) {
-		return NULL;
-	}
-	
-	unsigned char *decrypted_data = BN_bn2hex(res);
-						
+#include <openssl/evp.h>
+
+
+#define KEY_LENGTH  2048
+
+
+void handle_errors(){
+    ERR_print_errors_fp(stderr);
+    return NULL;
+}
+
+
+char *process(char *data, int length, RSA *rsa_priv_key){
+	// Note that "RSA" data structure is from OpenSSL version 1.1
+	// Assume data is in binary
+
+	// Get values from the provided rsa_priv_key
+	BIGNUM *n=BN_new();
+  	BIGNUM *d=BN_new();
+
+	// Get n and d:					RSA_get0_key(const RSA *r, const BIGNUM **n, const BIGNUM **e, const BIGNUM **d);
+	RSA_get0_key(rsa_priv_key, &n, NULL, &d);
+
+	// Convert data into BN: 		BIGNUM *BN_bin2bn(const unsigned char *s, int len, BIGNUM *ret);
+	BIGNUM *data_bn = BN_new();
+	BN_bin2bn(data, length, data_bn);
+
+	// Check and compute the decryption: data^d mod n
+	BN_CTX *ctx=BN_CTX_new();
+	BIGNUM *dec=BN_new();
+
+	if(!BN_mod_exp(dec, data_bn, d, n, ctx))
+		handle_errors();
+
+	// Decryption has been done 
+	// Convert dec (BN) into binary : 	BN_bn2bin(const BIGNUM *a, unsigned char *to);
+	unsigned char decrypted_data[RSA_size(keypair)] = "";
+	BN_bn2dec(dec, decrypted_data);
+
+
+
+	// Computes the hash h of decrypted_data using SHA256
 	EVP_MD_CTX *md = EVP_MD_CTX_new();
-	
-	EVP_DigestInit(md, EVP_sha256());
-			
-	EVP_DigestUpdate(md, decrypted_data, strlen(decrypted_data));
+    if(!EVP_DigestInit(md, EVP_sha256()))
+        handle_errors();
 
-    unsigned char md_value[EVP_MD_size(EVP_sha256())];
+     if(!EVP_DigestUpdate(md, decrypted_data, strlen(decrypted_data))
+     	handle_errors();
+
+    unsigned char md_value[EVP_MD_size(EVP_sha256())];       
     int md_len;
-	
-	EVP_DigestFinal_ex(md, md_value, &md_len);
-	
+
+    if(!EVP_DigestFinal(md, md_value, &md_len))
+    	handle_errors();
+
 	EVP_MD_CTX_free(md);
-	
-	char *res = malloc(3*sizeof(char));
-	
-	res[0] = decrypted_data[strlen(decrypted_data)-1];
-	res[1] = md_value[md_len-1];
-	res[2] = res[0]^res[1];
-	
-    CRYPTO_cleanup_all_ex_data();
-    ERR_free_strings();
-	
-	return res;
+    RSA_free(keypair);
+
+    // All OK => return 3 bytes
+    unsigned char return_value[3] = "";
+
+	// As a first byte, the least significant bit of decrypted_data
+	return_value[0] = decrypted_data[strlen(decrypted_data)-1];
+	// As a second byte, the least significant bit of the hash h;
+	return_value[1] = md_value[md_len-1];
+	// As a third byte, the XOR of the previous two bytes
+	return_value[2] = return_value[0] ^ return_value[1];
+
+	return return_value;
 }

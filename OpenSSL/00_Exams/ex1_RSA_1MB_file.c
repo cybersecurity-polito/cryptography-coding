@@ -14,63 +14,74 @@
  * the communication issues for this exercise
  *
  **/
-#include <stdio.h>
-#include <openssl/rsa.h>
-#include <openssl/rand.h>
-#include <openssl/err.h>
 
-#define MAX 16
-#define ENCRYPT 1
-#define DECRYPT 0
-#define MAX_ENC_LEN 1000000
+
+
+// Note that: RSA can only encrypt data smaller than (or equal to) the key length (max 4096 bits).
+
+// If you don't want to chunk the file, an approach is HYBRID ENCRYPTION:
+// - Creating a random symmetric key R
+// - Encrypting the large file with the symmetric key R
+// - Encrypting the symmetric key R with an asymmetric RSA public key
+// - Transmit both the encrypted key and the encrypted file
+
+#include <stdio.h>
+#include <string.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/bn.h>
+
+
 #define MAX_BUFFER 1024
+#define FILE_SIZE 1024*1024
+#define BYTES 16
 
 void handle_errors(){
     ERR_print_errors_fp(stderr);
     abort();
 }
 
-int main() {
-    
-    ERR_load_crypto_strings();
-    OpenSSL_add_all_algorithms();
+int main(){
+    // EVP_PKEY *bob_pubkey = ... ;     already loaded
+    // FILE *file_in = fopen(...);      already loaded
 
-    /* Assuming they are already filled */
-    RSA *bob_pubkey;
-    FILE *file_in;
+    // Generate a Key and IV of 128 bits
+    unsigned char key[BYTES];
+    unsigned char iv[BYTES];
 
-    unsigned char key[MAX];
-    unsigned char iv[MAX];
-
-    /* Generate key and IV random of 128 bytes */
-    if(RAND_load_file("/dev/random", 64) != 64)
-        handle_errors();
-    
-    if(!RAND_bytes(key,MAX))
-        handle_errors();
-        
-    if(!RAND_bytes(iv,MAX))
+    if(RAND_load_file("/dev/random", 64) != 64) //optional on Linux
         handle_errors();
 
-    /* Encrypt 1MB file using symm enc with key */
+    if(!RAND_bytes(key, BYTES))
+        handle_errors();
+
+    if(!RAND_bytes(iv, BYTES))
+        handle_errors();
+
+
+    // Encrypt the file with symmetric encryption
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-
     if(ctx == NULL)
-        abort();
-
-    if(!EVP_CipherInit(ctx, EVP_aes_128_cbc(), key, iv, ENCRYPT))
         handle_errors();
 
-    unsigned char ciphertext[MAX_ENC_LEN];
+    if(!EVP_CipherInit(ctx,EVP_aes_128_cbc(), key, iv, 1))
+        handle_errors();
+
+    
+
+    unsigned char ciphertext[FILE_SIZE];
 
     int update_len, final_len;
     int ciphertext_len=0;
     int n_read;
+
     unsigned char buffer[MAX_BUFFER];
 
     while((n_read = fread(buffer,1,MAX_BUFFER,file_in)) > 0){
-        if(ciphertext_len > MAX_ENC_LEN - n_read - EVP_CIPHER_CTX_block_size(ctx)){ //use EVP_CIPHER_get_block_size with OpenSSL 3.0+
-            fprintf(stderr,"The file to cipher is larger than I can\n");
+        if(ciphertext_len > FILE_SIZE - n_read - EVP_CIPHER_CTX_block_size(ctx)){
+            fprintf(stderr,"The file to cipher is larger than I can manage\n");
             abort();
         }
     
@@ -78,8 +89,9 @@ int main() {
             handle_errors();
         ciphertext_len+=update_len;
     }
-    fclose(file_in);
 
+    fclose(file_in);
+    
     if(!EVP_CipherFinal_ex(ctx,ciphertext+ciphertext_len,&final_len))
         handle_errors();
 
@@ -87,23 +99,29 @@ int main() {
 
     EVP_CIPHER_CTX_free(ctx);
 
-    /* Encrypt the key with RSA bob pub key */
-    int encrypted_data_len;
-    unsigned char encrypted_data[RSA_size(bob_pubkey)];
 
 
-    if((encrypted_data_len = RSA_public_encrypt(strlen(key), key, encrypted_data, bob_pubkey, RSA_PKCS1_OAEP_PADDING)) == -1) 
-            handle_errors();
+    // Encrypt the key with asymetric encryption
+    EVP_PKEY_CTX* enc_ctx = EVP_PKEY_CTX_new(bob_pubkey, NULL);
+    if (EVP_PKEY_encrypt_init(enc_ctx) <= 0)
+        handle_errors();
 
-    RSA_free(bob_pubkey);
+    if (EVP_PKEY_CTX_set_rsa_padding(enc_ctx, RSA_PKCS1_OAEP_PADDING) <= 0)
+        handle_errors();
+    
+    size_t encrypted_key_len;
+    if (EVP_PKEY_encrypt(enc_ctx, NULL, &encrypted_key_len, key, strlen(key)) <= 0) 
+        handle_errors();
+    
+    unsigned char encrypted_key[encrypted_key_len];
+    if (EVP_PKEY_encrypt(enc_ctx, encrypted_key, &encrypted_key_len, key, strlen(key)) <= 0)
+        handle_errors();
 
-    /* Send message and then the encrypted symm key to Bob and the IV */
-    send_bob(ciphertext);
-    send_bob(iv);
-    send_bob(encrypted_data);
 
-    CRYPTO_cleanup_all_ex_data();
-    ERR_free_strings();
+    // Send all to Bob
+    send_bob(encrypted_key);    // Key encrypted (ASYM)
+    send_bob(ciphertext);       // File encrypted with the encrypted_key
+    send_bob(iv)
 
     return 0;
 }
