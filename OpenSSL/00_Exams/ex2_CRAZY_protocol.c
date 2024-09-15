@@ -22,14 +22,12 @@
  **/
 
 #include <stdio.h>
-#include <openssl/bn.h>
-#include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/err.h>
 #include <openssl/rsa.h>
+#include <openssl/pem.h>    
+#include <openssl/err.h>
+#include <openssl/evp.h>
 
-#define ENCRYPT 1
-#define DECRYPT 0
 
 #define BITS 128
 
@@ -38,11 +36,11 @@ void handle_errors(){
     abort();
 }
 
-int main(int argc, char **argv) {
-    
-    ERR_load_crypto_strings();
+int main(){
     OpenSSL_add_all_algorithms();
 
+
+// PART: 1
     BIGNUM *rand1=BN_new();
     BIGNUM *rand2=BN_new();
     BN_CTX *ctx=BN_CTX_new();
@@ -51,103 +49,111 @@ int main(int argc, char **argv) {
     BN_rand(rand1,BITS,0,1);
     BN_rand(rand2,BITS,0,1);
 
-    // Generating k1
+    printf("Done part 1\n");
+
+// PART 2
     BIGNUM *sum=BN_new();
     BN_add(sum,rand1,rand2);
   
     BIGNUM *sub=BN_new();
     BN_sub(sub,rand1,rand2);
 
-    BIGNUM *mul=BN_new();
-    BN_mul(mul,sum,sub,ctx);
-
-    // Generate 2^128 bignum modulus
     BIGNUM *mod=BN_new();
     BIGNUM *base=BN_new();
     BIGNUM *exp=BN_new();
-
     BN_set_word(base,2);
     BN_set_word(exp,128);
-
     BN_exp(mod,base,exp,ctx);
 
-    // Calculate mod
     BIGNUM *k1=BN_new();
-    BN_mod(k1,mul,mod,ctx);
+    BN_mod_mul(k1, sum, sub, mod, ctx);
 
-    // Calculate k2
-    BN_mul(mul,rand1,rand2,ctx);
+    printf("Done part 2\n");
+
+
+// PART 3
+    BIGNUM *mul=BN_new();
+    BN_mul(mul,rand1,rand2, ctx);
+
     BIGNUM *div=BN_new();
-    BN_div(div,NULL,mul,sub,ctx);
+    BN_div(div, NULL, mul, sub, ctx);
 
     BIGNUM *k2=BN_new();
-    BN_mod(k2,div,mod,ctx);
+    BN_mod(k2, div, mod, ctx);
 
-    BN_free(rand1);
-    BN_free(rand2);
-    BN_free(sum);
-    BN_free(sub);
-    BN_free(mul);
-    BN_free(mod);
-    BN_free(base);
-    BN_free(exp);
-    BN_free(div);
+
+
+    printf("Done part 3\n");
+
+// PART 4: Encrypt k2 using k1
+    unsigned char k1_bin[16];
+    unsigned char k2_bin[16];
+    unsigned char enc_k2[16]; 
+
+    
+    BN_bn2bin(k1, k1_bin);
+    BN_bn2bin(k2, k2_bin);
+
+    BN_free(k1);
+    BN_free(k2);
+    BN_CTX_free(ctx);
+
+    // Random initialization of the IV in pedantic mode
+    unsigned char iv[] = "1111111111111111";
+
 
     EVP_CIPHER_CTX *aes_ctx = EVP_CIPHER_CTX_new();
+    EVP_CipherInit(aes_ctx,EVP_aes_128_cbc(), k1, iv, 1);
 
-    char *c_k1 = BN_bn2hex(k1);
-	char *c_k2 = BN_bn2hex(k2);
-    char *iv;
-
-    if(!EVP_CipherInit(aes_ctx, EVP_aes_128_cbc(), c_k1, iv, ENCRYPT))
-        handle_errors();
-
-    unsigned char enc_k2[strlen(c_k2)+16];
 
     int update_len, final_len;
     int ciphertext_len=0;
 
-    if(!EVP_CipherUpdate(ctx,enc_k2,&update_len, c_k2,strlen(c_k2)))
-        handle_errors();
-
+    EVP_CipherUpdate(aes_ctx,enc_k2,&update_len, k2_bin,strlen(k2_bin));
     ciphertext_len+=update_len;
 
-    if(!EVP_CipherFinal_ex(ctx,enc_k2+ciphertext_len,&final_len))
-        handle_errors();
-
+    EVP_CipherFinal_ex(aes_ctx,enc_k2+ciphertext_len,&final_len);
     ciphertext_len+=final_len;
 
-    RSA *rsa_keypair = NULL;
-    BIGNUM *bne = NULL;
+    EVP_CIPHER_CTX_free(aes_ctx);
 
-    int bits = 2048;
-    unsigned long e = RSA_F4;
+    printf("Done part 4\n");
 
-    bne = BN_new();
-    if(!BN_set_word(bne,e))
+
+
+// Part 5: Generate an RSA keypair with a 2048-bit modulus.
+    EVP_PKEY *keypair = NULL;
+
+    if((keypair = EVP_RSA_gen(2048)) == NULL ) 
         handle_errors();
 
-    rsa_keypair = RSA_new();
-    if(!RSA_generate_key_ex(rsa_keypair, bits, bne, NULL)) /* callback not needed for our purposes */
+    printf("Done part 5\n");
+
+// PArt 6: Encrypt enc_k2 using the just generated RSA key.
+    EVP_PKEY_CTX* enc_ctx = EVP_PKEY_CTX_new(keypair, NULL);
+    if (EVP_PKEY_encrypt_init(enc_ctx) <= 0) 
         handle_errors();
-
-    BN_free(bne);
+  
+    if (EVP_PKEY_CTX_set_rsa_padding(enc_ctx, RSA_PKCS1_OAEP_PADDING) <= 0)
+        handle_errors();
     
-    int encrypted_data_len;
-    unsigned char encrypted_data[RSA_size(rsa_keypair)];
+    size_t encrypted_msg_len;
+    if (EVP_PKEY_encrypt(enc_ctx, NULL, &encrypted_msg_len, enc_k2, strlen(enc_k2)) <= 0)
+        handle_errors();
+   
 
-
-    if((encrypted_data_len = RSA_public_encrypt(strlen(enc_k2), enc_k2, encrypted_data, rsa_keypair, RSA_PKCS1_OAEP_PADDING)) == -1) 
-            handle_errors();
+    unsigned char encrypted_msg[encrypted_msg_len];
+    if (EVP_PKEY_encrypt(enc_ctx, encrypted_msg, &encrypted_msg_len, enc_k2, strlen(enc_k2)) <= 0)
+        handle_errors();
     
-    EVP_CIPHER_CTX_free(ctx);
+    EVP_PKEY_free(keypair);
 
-    RSA_free(rsa_keypair);
+    printf("Done part 6\n");
 
-	BN_CTX_free(ctx);
+    printf("Ciphertext length = %d\n", encrypted_msg_len);
+    for(int i = 0; i < encrypted_msg_len; i++)
+        printf("%02x", encrypted_msg[i]);
+    printf("\n");
 
-    CRYPTO_cleanup_all_ex_data();
-    ERR_free_strings();
-    
     return 0;
 }

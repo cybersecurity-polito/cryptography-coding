@@ -14,11 +14,9 @@ from mysniffeddata import ciphertext
 
 from mydata import correct_server_answer
 
-# Mallory tried to change some random bits of the ciphertext and resent the whole
-# ciphertext to the server
+# Mallory tried to change some random bits of the ciphertext and resent the whole ciphertext to the server
 
 # She observed the following behaviour:
-
 # When changing 1 bit in ciphertext[32:], the answer of the server is "\x01\x00\x00\x00".
 # She stored this answer to be obtained as 
 
@@ -29,19 +27,29 @@ from mydata import wrong_server_answer
 # When changing 1 bit in ciphertext[24:32], the answer of the server is "\x01\x00\x00\x00"
 
 # What can Mallory guess about the first 16 bytes of the sniffed data?
-# They may be the IV of the ciphertext.
+# The first 16 bytes could either be an Initialization Vector (IV) or the first block of the encrypted payload.
+# Considering the message is 48 bytes long, altering a bit in the first block won't affect the padding, which (if presented) is located in the last block.
+
 
 # What can Mallory guess about the last 16 bytes of the sniffed data?
-# They can contain some text and then some padding if the plaintext is not multiple of a block
+# Typically, padding is included in the last block, which could be entirely padding or a combination of encrypted payload and padding.
+# By modifying bytes in the range of 16 to 24 (the second block), no errors occur, suggesting that the corresponding bytes in the subsequent block (32-40) that are XORed do not contain padding. 
+# However, altering bytes between 24 and 32 results in errors, indicating that the corresponding bytes in the last block contain padding.
+# Thus, it is likely that the last block consists of both encrypted payload and padding. By testing the full range, we can determine the exact split between payload and padding.
+# For instance, if every byte in the range [16:24] returns \x00\x00\x00\x00 (OK) and every byte in [24:32] returns \x01\x00\x00\x00 (NO), we can conclude there are exactly 8 bytes of payload and 8 bytes of padding.
+
 
 # Can you guess the size of the plaintext?
-# The size can be 48 bytes - 16 bytes for the IV - padding if any = 32 bytes at most, 16 bytes minimum
+# If the first block is the IV, the size of the plaintext would be 48 bytes minus the 16 bytes for the IV, minus the padding.
+# Based on server responses, we know that the last block contains both padding and plaintext. Therefore:
+# - The maximum plaintext size would be 31 bytes (blocks from 16 to 32 and from 32 to 47, with the 48th byte as padding).
+# - The minimum plaintext size would be 17 bytes (blocks from 16 to 32, plus one byte from 32 to 33, with the remaining bytes of the last block being padding).
+
 
 # What kind of attack can Mallory try to decrypt the ciphertext?
 # She can try the CBC Padding Oracle attack.
 
 # Write an implementation to decrypt ciphertext[16:32]
-
 def num_blocks(ciphertext, block_size):
     return math.ceil(len(ciphertext)/block_size)
     
@@ -91,8 +99,6 @@ def guess_byte(p,c,ciphertext,block_size):
                 continue
             c.insert(0,i)
             p.insert(0,p_prime)
-
-
     return 
 
 if __name__ == '__main__':
